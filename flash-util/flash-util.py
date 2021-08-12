@@ -12,6 +12,8 @@ import binascii
 
 # Currently only single block programming possible. Use Renesas Flash Programmer V2 to flash multiple blocks.
 
+# Number of blocks in PD78F0513
+nBlocks = 32
 
 StatusList = {
     0x00: "No data",
@@ -81,8 +83,8 @@ class Programmer(object):
             return
         b += self.ser.read(b[1]+1+1)
         # TODO: ADD CRC CHECK
-        print("Status: ", StatusList[b[2]])
-        print(b)
+        print("Response: ", StatusList[b[2]])
+
         return b[2]
     
     def Reset(self):
@@ -104,7 +106,6 @@ class Programmer(object):
         start_address = block * 1024
         end_address = ((block + 1) * 1024) -1
         b = bytearray()
-        print("block address from: " + str(hex(start_address)) + " to: " + str(hex(end_address)))
 
         b.append(0x01)   # Start byte
         b.append(0x07)   # Length
@@ -121,19 +122,25 @@ class Programmer(object):
         b.append(0x03) # stop byte
         self.ser.write(b)
 
-        self.Receive()
-        return
+        status = self.Receive()
+        if status != 0x06:
+            print("Block not empty")
+            return False
+        print("Block empty")    
+        return True
     
-    def Program(self, block, file):
-        if block == None:
-            block = 1
-        self.ProgramBlock(block,file)
+    def Program(self, startBlock, file):
+        endBlock = startBlock
+        if startBlock == 0:
+            startBlock = 0
+            endBlock = nBlocks - 1 
+        self.ProgramBlock(startBlock, endBlock, file)
 
         return
     
-    def ProgramBlock(self, block, file):
-        start_address = block * 1024
-        end_address = ((block + 1) * 1024) -1
+    def ProgramBlock(self, startBlock, endBlock, file):
+        start_address = startBlock * 1024
+        end_address = ((endBlock + 1) * 1024) -1
         b = bytearray()
 
         b.append(0x01)   # Start byte
@@ -157,7 +164,7 @@ class Programmer(object):
         status = self.Receive()
         if status != 0x06:
             print("error: Did not receive ACK, returning...")
-            return
+            return False
 
         b = bytearray()
 
@@ -209,9 +216,9 @@ class Programmer(object):
         status = self.Receive()
         if status != 0x06:
             print("error: Did not receive ACK, returning...")
-            return
+            return False
         print("Block erased.") 
-        return
+        return True
 
 
     def ChipErase(self):
@@ -230,16 +237,14 @@ class Programmer(object):
         status = self.Receive()
         if status != 0x06:
             print("error: Did not receive ACK, returning...")
-            return
+            return False
         print("Chip erased.") 
-        return
+        return True
     
     def Verify(self, block, file):
         if block == None:
             block = 1
-        self.VerifyBlock(block,file)
-
-        return
+        return self.VerifyBlock(block,file)
 
     def VerifyBlock(self, block, file):
         start_address = block * 1024
@@ -267,7 +272,7 @@ class Programmer(object):
         status = self.Receive()
         if status != 0x06:
             print("error: Did not receive ACK, returning...")
-            return
+            return False
 
         b = bytearray()
 
@@ -290,9 +295,9 @@ class Programmer(object):
         status = self.Receive()
         if status != 0x06:
             print("error: Verification failed! (mismatch?)")
-            return
+            return False
         print("Verification OK!")    
-        return
+        return True
 
 
 def usage():
@@ -307,7 +312,7 @@ def usage():
 
 def main():
     try:
-        opts, args = getopt.getopt(sys.argv[1:], "hp:f:ecb:vi:", ["help", "port=", "file=", "erase", "checkempty", "block=", "verify", "input="])
+        opts, args = getopt.getopt(sys.argv[1:], "hp:fecb:vi:", ["help", "port=", "flash", "erase", "checkempty", "block=", "verify", "input="])
     except getopt.GetoptError as err:
         # print help information and exit:
         print(err)  # will print something like "option -a not recognized"
@@ -315,7 +320,8 @@ def main():
         sys.exit(2)
     port = "COM1"
     file = None
-    block = None
+    block = 0
+    blockSpecified = False
 
     flash = False
     erase = False
@@ -337,7 +343,8 @@ def main():
                 usage()
                 sys.exit(2)
         elif o in ("-b", "--block"):
-            block = a
+            blockSpecified = True
+            block = int(a)
             print("specified block: ", block)
         elif o in ("-f", "--flash"):
             flash = True
@@ -348,8 +355,8 @@ def main():
         else:
             assert False, "unhandled option"
     
-    if flash or erase or verify:
-        if file == None and not erase:
+    if flash or erase or verify or checkEmpty:
+        if file == None and not (erase or checkEmpty):
             print("No file supplied")
             sys.exit(2)
 
@@ -360,27 +367,43 @@ def main():
         time.sleep(500/1000) # 500 ms sleep
 
         if erase:
-            if block == None:
-                print("Erasing chip...\n")
+            if not blockSpecified:
+                print("\nErasing chip...\n")
                 if not foo.ChipErase():
                     foo.ser.close()
                     sys.exit(2)
             else:
-                print("Erasing block", block, "...\n")
-                if not foo.ChipErase():
+                print("\nErasing block", block, "...\n")
+                if not foo.BlockErase(block):
                     foo.ser.close()
                     sys.exit(2) 
         if flash:
-            print("Flashing chip...\n")
+            print("\nFlashing chip...\n")
             if not foo.Program(block, file):
                 foo.ser.close()
                 sys.exit(2)
 
         if verify:
-            print("Verifying chip...\n")
+            print("\nVerifying chip...\n")
             if not foo.VerifyBlock(block, file):
                 foo.ser.close()
                 sys.exit(2)
+
+        if checkEmpty:
+            print("\nGetting empty blocks...\n")
+            blockStates = []
+            for x in range(nBlocks):
+                if not foo.BlankCheckBlock(x):
+                    blockStates.append("not empty")
+                else: 
+                    blockStates.append("empty")
+            
+            for x in range(nBlocks):
+                print("Block", x, blockStates[x])
+
+            foo.ser.close()
+            
+
         foo.ser.close()
 
     
